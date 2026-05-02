@@ -1,0 +1,27 @@
+* ajoute un captcha pour la securité a l'inscription
+
+* implemente les token CSRF sur des formulaire sensibles
+
+* ajoute la possibilité de recuper le mot de passe si oublier
+
+* renforcer les session (HttpOnly/Secure cookies)
+
+* mets a jour les dependances (ex. requests>=2.32, corrige CVE
+
+* Ajoute tests et SCA/DAST(PHPUnit, Sonar, ZAP)
+
+* Reverifie tout et fournir le fichier zip mise a jour
+
+* ajoute un captcha pour la securité a l'inscription
+
+* implemente les token CSRF sur des formulaire sensibles
+
+* ajoute la possibilité de recuper le mot de passe si oublier en envoyant un lien dans le mail 
+
+* renforcer les session (HttpOnly/Secure cookies)
+
+* mets a jour les dependances (ex. requests>=2.32, corrige CVE
+
+* Ajoute tests et SCA/DAST(PHPUnit, Sonar, ZAP)
+
+* Reverifie tout et fournir le fichier zip mise a jour

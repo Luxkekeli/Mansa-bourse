@@ -1,0 +1,12 @@
+/* P1-1 Vite scaffold — global styles will be migrated from app.html block by block. */
+:root {
+  --gold: #C9A84C;
+  --bg: #0A0A0F;
+  --text: #F0EDE6;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}

@@ -1,0 +1,39 @@
+.git/
+.github/
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Don't ship the dev DB — entrypoint creates one.
+mansa.db
+mansa.db-shm
+mansa.db-wal
+
+# Logs
+*.log
+server/logs/
+
+# Tests + tooling
+tests/
+docs/
+archive/
+data/
+node_modules/
+dist/
+
+# Misc
+.env
+.env.*
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+*.zip

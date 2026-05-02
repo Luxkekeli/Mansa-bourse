@@ -1,0 +1,13 @@
+{
+  "nav.dashboard": "Dashboard",
+  "nav.screener": "Screener",
+  "nav.portfolio": "Portfolio",
+  "nav.community": "Community",
+  "common.loading": "Loading...",
+  "common.search": "Search...",
+  "common.login": "Login",
+  "common.logout": "Log out",
+  "auth.welcome": "Welcome",
+  "time.last_update": "Last update",
+  "error.network": "Server unreachable"
+}

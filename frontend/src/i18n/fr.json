@@ -1,0 +1,13 @@
+{
+  "nav.dashboard": "Dashboard",
+  "nav.screener": "Screener",
+  "nav.portfolio": "Portefeuille",
+  "nav.community": "Communauté",
+  "common.loading": "Chargement...",
+  "common.search": "Rechercher...",
+  "common.login": "Connexion",
+  "common.logout": "Déconnexion",
+  "auth.welcome": "Bienvenue",
+  "time.last_update": "Dernière maj",
+  "error.network": "Connexion serveur impossible"
+}

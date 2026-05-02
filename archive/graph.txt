@@ -1,0 +1,834 @@
+import { useState, useEffect, useRef, useCallback, useMemo, memo } from "react";
+
+// ── Data unchanged ──────────────────────────────────────────
+function generateCandles(base, days = 300, volatility = 0.015) {
+  const candles = [];
+  let price = base;
+  const now = Date.now();
+  for (let i = days; i >= 0; i--) {
+    const d = new Date(now - i * 24 * 3600 * 1000);
+    if (d.getDay() === 0 || d.getDay() === 6) continue;
+    const change = (Math.random() - 0.48) * volatility;
+    const open = price;
+    const close = price * (1 + change);
+    const high = Math.max(open, close) * (1 + Math.random() * 0.008);
+    const low = Math.min(open, close) * (1 - Math.random() * 0.008);
+    candles.push({ t: d, o: +open.toFixed(0), h: +high.toFixed(0), l: +low.toFixed(0), c: +close.toFixed(0), v: Math.round(500 + Math.random() * 4500) });
+    price = close;
+  }
+  return candles;
+}
+
+const SYMBOLS = {
+  "SNTS":  { name: "Sonatel",          sector: "Télécom",     country: "🇸🇳", base: 19200, vol: 0.014 },
+  "SGBCI": { name: "SGB Côte d'Ivoire",sector: "Finance",     country: "🇨🇮", base: 12500, vol: 0.012 },
+  "ORGT":  { name: "Orange CI",        sector: "Télécom",     country: "🇨🇮", base: 14500, vol: 0.013 },
+  "CBIBF": { name: "Coris Bank BF",    sector: "Finance",     country: "🇧🇫", base: 11500, vol: 0.018 },
+  "ETIT":  { name: "Ecobank TI",       sector: "Finance",     country: "🇨🇮", base: 18,    vol: 0.016 },
+  "PALC":  { name: "Palm CI",          sector: "Agriculture", country: "🇨🇮", base: 7200,  vol: 0.017 },
+  "BOAB":  { name: "BOA Bénin",        sector: "Finance",     country: "🇧🇯", base: 6000,  vol: 0.013 },
+  "TTLC":  { name: "TotalEnergies CI", sector: "Énergie",     country: "🇨🇮", base: 1950,  vol: 0.012 },
+};
+
+// Pre-generate once, outside component — stable reference across renders
+const CANDLE_DATA = {};
+Object.entries(SYMBOLS).forEach(([sym, info]) => {
+  CANDLE_DATA[sym] = generateCandles(info.base, 300, info.vol);
+});
+
+// ── Indicators ──────────────────────────────────────────────
+function calcSMA(data, period) {
+  return data.map((_, i) =>
+    i < period - 1 ? null : data.slice(i - period + 1, i + 1).reduce((s, c) => s + c.c, 0) / period
+  );
+}
+function calcEMA(data, period) {
+  const k = 2 / (period + 1);
+  const ema = [];
+  let prev = null;
+  data.forEach((d, i) => {
+    if (i < period - 1) { ema.push(null); return; }
+    if (prev === null) prev = data.slice(0, period).reduce((s, c) => s + c.c, 0) / period;
+    prev = d.c * k + prev * (1 - k);
+    ema.push(prev);
+  });
+  return ema;
+}
+function calcRSI(data, period = 14) {
+  return data.map((_, i) => {
+    if (i < period) return null;
+    let gains = 0, losses = 0;
+    for (let j = i - period + 1; j <= i; j++) {
+      const d = data[j].c - data[j - 1].c;
+      if (d > 0) gains += d; else losses -= d;
+    }
+    const rs = gains / (losses || 0.001);
+    return 100 - 100 / (1 + rs);
+  });
+}
+
+// ── Helpers ─────────────────────────────────────────────────
+const fmt    = (n) => n >= 1000 ? n.toLocaleString("fr-FR") : n.toFixed(n < 10 ? 2 : 0);
+const fmtPct = (n) => (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+const fmtDate= (d) => d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short", year: "2-digit" });
+
+// ── Memoized list items — prevent re-renders ────────────────
+const WatchItem = memo(({ d, isActive, isUp, onSelect, th }) => (
+  <div
+    onClick={() => onSelect(d.sym)}
+    style={{
+      display: "flex", alignItems: "center", justifyContent: "space-between",
+      padding: "6px 10px", cursor: "pointer", borderRadius: 4,
+      background: isActive ? th.bg4 : "none",
+      borderLeft: isActive ? `2px solid ${th.blue}` : "2px solid transparent",
+      transition: "background .12s",
+    }}
+  >
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 700 }}>
+        {d.sym} <span style={{ color: th.text3, fontWeight: 400, fontSize: 10 }}>{d.country}</span>
+      </div>
+      <div style={{ fontSize: 9, color: th.text3 }}>{d.name}</div>
+    </div>
+    <div style={{ textAlign: "right" }}>
+      <div style={{ fontSize: 11, fontWeight: 700 }}>{fmt(d.last)}</div>
+      <div style={{ fontSize: 10, fontWeight: 700, color: isUp ? th.upC : th.downC }}>{fmtPct(d.chg)}</div>
+    </div>
+  </div>
+));
+
+// ── Chart rendering helpers ─────────────────────────────────
+// Extracts pure drawing logic — no React state dependencies
+function buildScales({ data, W, H, mainH, PAD_L, PAD_R, PAD_T, PAD_B }) {
+  const n = data.length;
+  const lows  = data.map(d => d.l);
+  const highs = data.map(d => d.h);
+  let minP = Math.min(...lows);
+  let maxP = Math.max(...highs);
+  const pRange = maxP - minP;
+  minP -= pRange * 0.05;
+  maxP += pRange * 0.12;
+  const chartW = W - PAD_L - PAD_R;
+  const chartH = mainH - PAD_T - PAD_B;
+  const xScale = (i) => PAD_L + (i / (n - 1)) * chartW;
+  const yScale = (p) => PAD_T + chartH - ((p - minP) / (maxP - minP)) * chartH;
+  const barW   = Math.max(1, (chartW / n) * 0.7);
+  return { n, minP, maxP, chartW, chartH, xScale, yScale, barW };
+}
+
+// ── Main component ───────────────────────────────────────────
+export default function BonjourChart() {
+  const [activeSym,     setActiveSym]     = useState("SNTS");
+  const [tf,            setTf]            = useState("1J");
+  const [indicators,    setIndicators]    = useState({ sma20: true, ema50: true, volume: true, rsi: true, macd: false });
+  const [chartType,     setChartType]     = useState("candle");
+  const [activePanel,   setActivePanel]   = useState("watchlist");
+  const [zoom,          setZoom]          = useState({ start: 0.65, end: 1 });
+  const [drawMode,      setDrawMode]      = useState(null);
+  const [orderTab,      setOrderTab]      = useState("buy");
+  const [qty,           setQty]           = useState("");
+  const [price_,        setPrice_]        = useState("");
+  const [searchQ,       setSearchQ]       = useState("");
+  const [showSearch,    setShowSearch]    = useState(false);
+  const [favorites]                       = useState(["SNTS", "SGBCI", "ORGT"]);
+  const [alerts,        setAlerts]        = useState([]);
+  const [showAlertForm, setShowAlertForm] = useState(false);
+  const [alertPrice,    setAlertPrice]    = useState("");
+  const [isDark,        setIsDark]        = useState(true);
+
+  // ── Refs ─────────────────────────────────────────────────
+  const canvasRef      = useRef(null);   // main chart
+  const overlayRef     = useRef(null);   // crosshair only
+  const offscreenRef   = useRef(null);   // cached main render
+  const crosshairRef   = useRef(null);   // crosshair state — no setState = no re-render
+  const rafRef         = useRef(null);   // animation frame for mousemove throttle
+  const mainDirtyRef   = useRef(true);   // flag: does main chart need redraw?
+  const scalesRef      = useRef(null);   // cached scale functions
+
+  const raw  = CANDLE_DATA[activeSym];
+  const info = SYMBOLS[activeSym];
+
+  // ── Derived data — memoized ───────────────────────────────
+  const visibleData = useMemo(() => {
+    const start = Math.floor(raw.length * zoom.start);
+    const end   = Math.ceil(raw.length * zoom.end);
+    return raw.slice(start, end);
+  }, [raw, zoom]);
+
+  // Mark main chart dirty whenever visible data or display options change
+  useEffect(() => { mainDirtyRef.current = true; }, [visibleData, indicators, chartType, isDark]);
+
+  const sma20   = useMemo(() => calcSMA(visibleData, 20),   [visibleData]);
+  const ema50   = useMemo(() => calcEMA(visibleData, 50),   [visibleData]);
+  const rsiData = useMemo(() => calcRSI(visibleData),       [visibleData]);
+
+  const last       = raw[raw.length - 1];
+  const prev       = raw[raw.length - 2];
+  const change     = last.c - prev.c;
+  const changePct  = (change / prev.c) * 100;
+  const isUp       = change >= 0;
+
+  // ── Theme object — memoized ───────────────────────────────
+  const th = useMemo(() => ({
+    bg:     isDark ? "#0a0e17" : "#f0f4f8",
+    bg2:    isDark ? "#0f1520" : "#ffffff",
+    bg3:    isDark ? "#141c2a" : "#f8fafc",
+    bg4:    isDark ? "#1a2336" : "#eef2f7",
+    border: isDark ? "#1e2d45" : "#d1d9e6",
+    text:   isDark ? "#e8f0f8" : "#0f172a",
+    text2:  isDark ? "#6b8aad" : "#4a5568",
+    text3:  isDark ? "#3a5070" : "#94a3b8",
+    green:  "#00e5a0",
+    red:    "#ff3b5c",
+    gold:   "#f6c344",
+    blue:   "#4f8ef7",
+    purple: "#a07bf7",
+    upC:    isDark ? "#00e5a0" : "#059669",
+    downC:  isDark ? "#ff3b5c" : "#dc2626",
+    gridC:  isDark ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.05)",
+    crossC: isDark ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.15)",
+  }), [isDark]);
+
+  // ── Watchlist data — memoized ─────────────────────────────
+  const watchData = useMemo(() =>
+    Object.entries(SYMBOLS).map(([sym, info]) => {
+      const d = CANDLE_DATA[sym];
+      const l = d[d.length - 1];
+      const p = d[d.length - 2];
+      return { sym, ...info, last: l.c, chg: ((l.c - p.c) / p.c) * 100 };
+    }),
+  []); // stable — CANDLE_DATA never changes
+
+  // ── Symbol search — memoized ──────────────────────────────
+  const filteredSymbols = useMemo(() =>
+    searchQ
+      ? Object.entries(SYMBOLS).filter(([sym, info]) =>
+          sym.includes(searchQ.toUpperCase()) ||
+          info.name.toLowerCase().includes(searchQ.toLowerCase()))
+      : Object.entries(SYMBOLS),
+  [searchQ]);
+
+  // ── DRAW MAIN CHART to offscreen canvas ──────────────────
+  // Only runs when data/indicators/chartType/theme change
+  const drawMain = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const W = canvas.offsetWidth;
+    const H = canvas.offsetHeight;
+
+    // Create or resize offscreen canvas
+    if (!offscreenRef.current) offscreenRef.current = document.createElement("canvas");
+    const off = offscreenRef.current;
+    off.width  = W * dpr;
+    off.height = H * dpr;
+
+    const ctx = off.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    const showRSI   = indicators.rsi;
+    const panelH    = showRSI ? 100 : 0;
+    const mainH     = H - panelH - (panelH > 0 ? 4 : 0);
+    const PAD_L = 0, PAD_R = 70, PAD_T = 24, PAD_B = 32;
+
+    const data = visibleData;
+    if (data.length < 2) return;
+
+    const scales = buildScales({ data, W, H, mainH, PAD_L, PAD_R, PAD_T, PAD_B });
+    scalesRef.current = { ...scales, W, H, mainH, PAD_L, PAD_R, PAD_T, PAD_B };
+    const { n, minP, maxP, chartW, chartH, xScale, yScale, barW } = scales;
+
+    // Background
+    ctx.fillStyle = th.bg;
+    ctx.fillRect(0, 0, W, H);
+
+    // Grid + price axis
+    ctx.strokeStyle = th.gridC;
+    ctx.lineWidth   = 0.5;
+    for (let g = 0; g <= 5; g++) {
+      const y = PAD_T + (g / 5) * chartH;
+      ctx.beginPath(); ctx.moveTo(PAD_L, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
+      const p = maxP - (g / 5) * (maxP - minP);
+      ctx.fillStyle   = th.text3;
+      ctx.font        = "10px 'JetBrains Mono', monospace";
+      ctx.textAlign   = "left";
+      ctx.fillText(fmt(p), W - PAD_R + 6, y + 4);
+    }
+
+    // Volume
+    if (indicators.volume) {
+      const maxVol = Math.max(...data.map(d => d.v));
+      data.forEach((d, i) => {
+        const x    = xScale(i);
+        const volH = (d.v / maxVol) * (chartH * 0.18);
+        ctx.fillStyle = d.c >= d.o ? "rgba(0,229,160,0.18)" : "rgba(255,59,92,0.18)";
+        ctx.fillRect(x - barW / 2, PAD_T + chartH - volH, barW, volH);
+      });
+    }
+
+    // Area / Line
+    if (chartType === "area" || chartType === "line") {
+      const firstClose = data[0].c;
+      const lineCol = last.c >= firstClose ? th.upC : th.downC;
+      if (chartType === "area") {
+        ctx.beginPath();
+        data.forEach((d, i) => ctx[i === 0 ? "moveTo" : "lineTo"](xScale(i), yScale(d.c)));
+        ctx.lineTo(xScale(n - 1), PAD_T + chartH);
+        ctx.lineTo(xScale(0), PAD_T + chartH);
+        ctx.closePath();
+        const grad = ctx.createLinearGradient(0, PAD_T, 0, PAD_T + chartH);
+        grad.addColorStop(0, lineCol + "40");
+        grad.addColorStop(1, lineCol + "00");
+        ctx.fillStyle = grad;
+        ctx.fill();
+      }
+      ctx.beginPath();
+      data.forEach((d, i) => ctx[i === 0 ? "moveTo" : "lineTo"](xScale(i), yScale(d.c)));
+      ctx.strokeStyle = lineCol;
+      ctx.lineWidth   = 1.8;
+      ctx.stroke();
+    }
+
+    // Candles / OHLC
+    if (chartType === "candle" || chartType === "bar") {
+      data.forEach((d, i) => {
+        const x    = xScale(i);
+        const bull = d.c >= d.o;
+        const col  = bull ? th.upC : th.downC;
+        const yO = yScale(d.o), yC = yScale(d.c), yH = yScale(d.h), yL = yScale(d.l);
+        const bodyTop = Math.min(yO, yC);
+        const bodyH   = Math.max(1, Math.abs(yC - yO));
+
+        if (chartType === "candle") {
+          ctx.strokeStyle = col; ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(x, yH); ctx.lineTo(x, bodyTop);
+          ctx.moveTo(x, bodyTop + bodyH); ctx.lineTo(x, yL);
+          ctx.stroke();
+          if (bull) {
+            ctx.strokeRect(x - barW / 2, bodyTop, barW, bodyH);
+            ctx.fillStyle = barW > 3 ? col + "40" : col;
+            ctx.fillRect(x - barW / 2, bodyTop, barW, bodyH);
+          } else {
+            ctx.fillStyle = col;
+            ctx.fillRect(x - barW / 2, bodyTop, barW, bodyH);
+          }
+        } else {
+          ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.moveTo(x, yH); ctx.lineTo(x, yL); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x - barW / 2, yO); ctx.lineTo(x, yO); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x, yC); ctx.lineTo(x + barW / 2, yC); ctx.stroke();
+        }
+      });
+    }
+
+    // SMA 20
+    if (indicators.sma20) {
+      ctx.beginPath(); let fr = true;
+      sma20.forEach((v, i) => { if (v === null) return; const x = xScale(i), y = yScale(v); fr ? (ctx.moveTo(x, y), fr = false) : ctx.lineTo(x, y); });
+      ctx.strokeStyle = th.gold; ctx.lineWidth = 1.2; ctx.setLineDash([]); ctx.stroke();
+    }
+
+    // EMA 50
+    if (indicators.ema50) {
+      ctx.beginPath(); let fr = true;
+      ema50.forEach((v, i) => { if (v === null) return; const x = xScale(i), y = yScale(v); fr ? (ctx.moveTo(x, y), fr = false) : ctx.lineTo(x, y); });
+      ctx.strokeStyle = th.purple; ctx.lineWidth = 1.2; ctx.stroke();
+    }
+
+    // Last price dashed line + label
+    const lastY = yScale(last.c);
+    ctx.strokeStyle = isUp ? th.upC : th.downC;
+    ctx.lineWidth   = 1;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath(); ctx.moveTo(PAD_L, lastY); ctx.lineTo(W - PAD_R, lastY); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = isUp ? th.upC : th.downC;
+    ctx.fillRect(W - PAD_R, lastY - 9, PAD_R, 18);
+    ctx.fillStyle   = "#000";
+    ctx.font        = "bold 10px 'JetBrains Mono', monospace";
+    ctx.textAlign   = "center";
+    ctx.fillText(fmt(last.c), W - PAD_R + PAD_R / 2, lastY + 4);
+
+    // Date axis
+    const step = Math.max(1, Math.floor(n / 8));
+    ctx.textAlign = "center"; ctx.fillStyle = th.text3;
+    ctx.font      = "9px 'JetBrains Mono', monospace";
+    data.forEach((d, i) => {
+      if (i % step !== 0) return;
+      ctx.fillText(fmtDate(d.t), xScale(i), PAD_T + chartH + 20);
+    });
+
+    // RSI panel
+    if (showRSI) {
+      const rsiTop = mainH + 4;
+      ctx.fillStyle = th.bg3; ctx.fillRect(0, rsiTop, W, panelH);
+      ctx.font = "bold 9px 'JetBrains Mono', monospace"; ctx.fillStyle = th.text3; ctx.textAlign = "left";
+      ctx.fillText("RSI (14)", 6, rsiTop + 14);
+      [30, 50, 70].forEach(level => {
+        const y = rsiTop + panelH - (level / 100) * panelH;
+        ctx.strokeStyle = level === 50 ? th.gridC : (level === 30 ? th.green + "40" : th.red + "40");
+        ctx.lineWidth = 0.5;
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W - PAD_R, y); ctx.stroke();
+        ctx.fillStyle = th.text3; ctx.font = "9px monospace"; ctx.textAlign = "left";
+        ctx.fillText(level, W - PAD_R + 4, y + 3);
+      });
+      ctx.beginPath(); let fr = true;
+      rsiData.forEach((v, i) => {
+        if (v === null) return;
+        const x = xScale(i), y = rsiTop + panelH - (v / 100) * panelH;
+        fr ? (ctx.moveTo(x, y), fr = false) : ctx.lineTo(x, y);
+      });
+      ctx.strokeStyle = th.blue; ctx.lineWidth = 1.5; ctx.stroke();
+    }
+
+    // Blit to visible canvas
+    const vCtx = canvas.getContext("2d");
+    canvas.width  = W * dpr;
+    canvas.height = H * dpr;
+    vCtx.drawImage(off, 0, 0);
+
+    mainDirtyRef.current = false;
+  }, [visibleData, indicators, chartType, sma20, ema50, rsiData, th, last, isUp]);
+
+  // ── DRAW CROSSHAIR — overlay canvas only ─────────────────
+  // Called every RAF tick, does NOT re-render React
+  const drawCrosshair = useCallback(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const dpr   = window.devicePixelRatio || 1;
+    const W     = overlay.offsetWidth;
+    const H     = overlay.offsetHeight;
+    overlay.width  = W * dpr;
+    overlay.height = H * dpr;
+    const octx  = overlay.getContext("2d");
+    octx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    octx.clearRect(0, 0, W, H);
+
+    const ch = crosshairRef.current;
+    if (!ch || !scalesRef.current) return;
+
+    const { mx, my, idx } = ch;
+    const { n, minP, maxP, mainH, PAD_L, PAD_R, PAD_T, chartH, xScale, yScale } = scalesRef.current;
+    if (idx < 0 || idx >= n) return;
+
+    const data = visibleData;
+    const cx   = xScale(idx);
+
+    // Crosshair lines
+    octx.strokeStyle = th.crossC;
+    octx.lineWidth   = 1;
+    octx.setLineDash([4, 3]);
+    octx.beginPath(); octx.moveTo(cx, 0);  octx.lineTo(cx, mainH); octx.stroke();
+    octx.beginPath(); octx.moveTo(0,  my); octx.lineTo(W,  my);    octx.stroke();
+    octx.setLineDash([]);
+
+    const d = data[idx];
+    const hoverP = minP + (1 - (my - PAD_T) / chartH) * (maxP - minP);
+
+    // Tooltip
+    const ttW = 180, ttH = 110;
+    const ttX = cx + 12 > W - ttW - 10 ? cx - ttW - 12 : cx + 12;
+    const ttY = Math.max(10, Math.min(my - ttH / 2, mainH - ttH - 10));
+    octx.fillStyle   = th.bg4; octx.strokeStyle = th.border; octx.lineWidth = 1;
+    octx.beginPath(); octx.roundRect(ttX, ttY, ttW, ttH, 6); octx.fill(); octx.stroke();
+
+    const bull = d.c >= d.o;
+    const col  = bull ? th.upC : th.downC;
+    octx.font = "bold 11px 'JetBrains Mono', monospace"; octx.fillStyle = col; octx.textAlign = "left";
+    octx.fillText(fmtDate(d.t), ttX + 10, ttY + 18);
+    [["O", d.o], ["H", d.h], ["L", d.l], ["C", d.c]].forEach(([lbl, val], ri) => {
+      octx.fillStyle = th.text2; octx.font = "9px 'JetBrains Mono', monospace";
+      octx.fillText(lbl, ttX + 10, ttY + 36 + ri * 17);
+      octx.fillStyle = lbl === "C" ? col : th.text;
+      octx.font = lbl === "C" ? "bold 10px 'JetBrains Mono', monospace" : "10px 'JetBrains Mono', monospace";
+      octx.fillText(fmt(val) + " F", ttX + 32, ttY + 36 + ri * 17);
+    });
+
+    // Y-axis bubble
+    octx.fillStyle = th.bg4; octx.strokeStyle = th.border;
+    octx.beginPath(); octx.roundRect(W - PAD_R, my - 9, PAD_R - 2, 18, 3); octx.fill(); octx.stroke();
+    octx.fillStyle = th.text; octx.font = "10px 'JetBrains Mono', monospace"; octx.textAlign = "center";
+    octx.fillText(fmt(hoverP), W - PAD_R + (PAD_R - 2) / 2, my + 4);
+  }, [visibleData, th]); // crosshairRef is a ref — not in deps
+
+  // ── COMBINED RENDER — main + crosshair ───────────────────
+  const render = useCallback(() => {
+    if (mainDirtyRef.current) drawMain();
+    drawCrosshair();
+  }, [drawMain, drawCrosshair]);
+
+  // ── RESIZE with debounce ──────────────────────────────────
+  useEffect(() => {
+    let timer;
+    const onResize = () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { mainDirtyRef.current = true; render(); }, 60);
+    };
+    window.addEventListener("resize", onResize);
+    render();
+    return () => { window.removeEventListener("resize", onResize); clearTimeout(timer); };
+  }, [render]);
+
+  // ── MOUSEMOVE — throttled with RAF ────────────────────────
+  const handleMouseMove = useCallback((e) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const rect   = canvas.getBoundingClientRect();
+    const mx     = e.clientX - rect.left;
+    const my     = e.clientY - rect.top;
+    const n      = visibleData.length;
+    const PAD_R  = 70;
+    const chartW = canvas.offsetWidth - PAD_R;
+    const idx    = Math.round(mx / chartW * (n - 1));
+
+    crosshairRef.current = { mx, my, idx: Math.max(0, Math.min(idx, n - 1)) };
+
+    // Throttle to 1 draw per animation frame
+    if (!rafRef.current) {
+      rafRef.current = requestAnimationFrame(() => {
+        drawCrosshair();
+        rafRef.current = null;
+      });
+    }
+  }, [visibleData, drawCrosshair]);
+
+  const handleMouseLeave = useCallback(() => {
+    crosshairRef.current = null;
+    if (rafRef.current) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+    drawCrosshair();
+  }, [drawCrosshair]);
+
+  // ── WHEEL ZOOM ────────────────────────────────────────────
+  const handleWheel = useCallback((e) => {
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? 0.05 : -0.05;
+    setZoom(z => {
+      const range    = z.end - z.start;
+      const newRange = Math.max(0.05, Math.min(1, range + delta));
+      const center   = (z.start + z.end) / 2;
+      return { start: Math.max(0, center - newRange / 2), end: Math.min(1, center + newRange / 2) };
+    });
+  }, []);
+
+  // currentD — used in JSX for live price display in topbar
+  const currentD = (crosshairRef.current && visibleData[crosshairRef.current.idx]) || last;
+
+  // ── Shorthand style aliases ───────────────────────────────
+  const { bg, bg2, bg3, bg4, border, text, text2, text3 } = th;
+
+  // ════════════════════════════════════════════════════════
+  // JSX — layout unchanged, only performance fixes applied
+  // ════════════════════════════════════════════════════════
+  return (
+    <div style={{ fontFamily: "'JetBrains Mono','Fira Code',monospace", background: bg, color: text, height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
+        ::-webkit-scrollbar{width:4px;height:4px}
+        ::-webkit-scrollbar-track{background:transparent}
+        ::-webkit-scrollbar-thumb{background:${border};border-radius:2px}
+        *{box-sizing:border-box}
+        .btn-icon{background:none;border:none;cursor:pointer;padding:4px 8px;border-radius:4px;transition:background .15s;display:flex;align-items:center;gap:4px}
+        .btn-icon:hover{background:${bg4}}
+        .tab-btn{padding:3px 10px;border-radius:3px;border:none;cursor:pointer;font-size:11px;font-family:inherit;font-weight:600;transition:all .15s}
+        input{font-family:inherit}
+        .pill{padding:2px 8px;border-radius:20px;font-size:10px;font-weight:700}
+        @keyframes fadeIn{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+        .fade-in{animation:fadeIn .2s ease}
+        @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+        .live-dot{animation:pulse 2s infinite}
+      `}</style>
+
+      {/* TOP BAR */}
+      <div style={{ height: 48, background: bg2, borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", paddingInline: 12, gap: 8, flexShrink: 0, zIndex: 100 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, marginRight: 8 }}>
+          <div style={{ width: 28, height: 28, background: "linear-gradient(135deg,#00e5a0,#4f8ef7)", borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 900 }}>B</div>
+          <span style={{ fontSize: 12, fontWeight: 700, color: text }}>BONJOUR<span style={{ color: "#00e5a0" }}>.chart</span></span>
+        </div>
+
+        {/* Symbol picker */}
+        <div style={{ position: "relative" }}>
+          <button onClick={() => setShowSearch(s => !s)}
+            style={{ background: bg3, border: `1px solid ${border}`, borderRadius: 6, padding: "5px 12px", color: text, cursor: "pointer", fontSize: 12, fontWeight: 700, display: "flex", alignItems: "center", gap: 8, fontFamily: "inherit" }}>
+            <span style={{ fontSize: 14 }}>{info.country}</span>
+            <span>{activeSym}</span>
+            <span style={{ color: text3, fontWeight: 400 }}>— {info.name}</span>
+            <span style={{ color: text3, fontSize: 10 }}>▾</span>
+          </button>
+          {showSearch && (
+            <div className="fade-in" style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, width: 280, background: bg2, border: `1px solid ${border}`, borderRadius: 8, zIndex: 999, boxShadow: "0 12px 40px rgba(0,0,0,.5)", overflow: "hidden" }}>
+              <input value={searchQ} onChange={e => setSearchQ(e.target.value)} placeholder="Rechercher un titre BRVM…"
+                style={{ width: "100%", padding: "10px 14px", background: bg3, border: "none", borderBottom: `1px solid ${border}`, color: text, fontSize: 12, outline: "none" }} autoFocus />
+              <div style={{ maxHeight: 220, overflowY: "auto" }}>
+                {filteredSymbols.map(([sym, si]) => {
+                  const d = CANDLE_DATA[sym]; const l = d[d.length - 1], p = d[d.length - 2];
+                  const chg = ((l.c - p.c) / p.c) * 100;
+                  return (
+                    <div key={sym} onClick={() => { setActiveSym(sym); setShowSearch(false); setSearchQ(""); }}
+                      style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 10px", cursor: "pointer", borderRadius: 4, transition: "background .12s" }}
+                      onMouseEnter={e => e.currentTarget.style.background = bg4}
+                      onMouseLeave={e => e.currentTarget.style.background = "none"}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 14 }}>{si.country}</span>
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 700 }}>{sym}</div>
+                          <div style={{ fontSize: 10, color: text3 }}>{si.name}</div>
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 11, fontWeight: 600 }}>{fmt(l.c)}</div>
+                        <div style={{ fontSize: 10, color: chg >= 0 ? th.upC : th.downC, fontWeight: 700 }}>{fmtPct(chg)}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Price */}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: 4 }}>
+          <span style={{ fontSize: 18, fontWeight: 700, color: isUp ? th.upC : th.downC }}>{fmt(currentD.c)}</span>
+          <span style={{ fontSize: 12 }}>FCFA</span>
+          <span className="pill" style={{ background: isUp ? th.upC + "20" : th.downC + "20", color: isUp ? th.upC : th.downC }}>
+            {isUp ? "▲" : "▼"} {fmtPct(changePct)}
+          </span>
+          <div style={{ display: "flex", gap: 6, fontSize: 10, color: text3 }}>
+            <span>H:{fmt(currentD.h)}</span>
+            <span>L:{fmt(currentD.l)}</span>
+            <span>V:{currentD.v.toLocaleString()}</span>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 4, marginLeft: 4 }}>
+          <div className="live-dot" style={{ width: 6, height: 6, borderRadius: "50%", background: th.upC }} />
+          <span style={{ fontSize: 9, color: text3, fontWeight: 600 }}>BRVM LIVE</span>
+        </div>
+        <div style={{ flex: 1 }} />
+
+        {/* Timeframes */}
+        <div style={{ display: "flex", gap: 2, background: bg3, borderRadius: 6, padding: "3px" }}>
+          {["1H", "4H", "1J", "1S", "1M", "3M"].map(t => (
+            <button key={t} className="tab-btn" onClick={() => setTf(t)}
+              style={{ background: tf === t ? "#00e5a0" : "none", color: tf === t ? "#000" : text3 }}>{t}</button>
+          ))}
+        </div>
+
+        {/* Chart type */}
+        <div style={{ display: "flex", gap: 2, background: bg3, borderRadius: 6, padding: "3px", marginLeft: 4 }}>
+          {[["candle","🕯"],["bar","▐"],["line","∼"],["area","◭"]].map(([t, ic]) => (
+            <button key={t} className="tab-btn" onClick={() => setChartType(t)}
+              style={{ background: chartType === t ? bg4 : "none", color: chartType === t ? text : text3, fontSize: 13 }}>{ic}</button>
+          ))}
+        </div>
+
+        <button className="btn-icon" onClick={() => setIsDark(d => !d)} style={{ color: text2, fontSize: 14 }}>
+          {isDark ? "☀️" : "🌙"}
+        </button>
+      </div>
+
+      {/* MAIN LAYOUT */}
+      <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+
+        {/* Left toolbar */}
+        <div style={{ width: 44, background: bg2, borderRight: `1px solid ${border}`, display: "flex", flexDirection: "column", alignItems: "center", padding: "8px 0", gap: 4, flexShrink: 0 }}>
+          {[{ id: null, icon: "↖", tip: "Sélection" }, { id: "trend", icon: "╱", tip: "Tendance" }, { id: "hline", icon: "─", tip: "Horizontal" }, { id: "rect", icon: "▭", tip: "Rectangle" }, { id: "fib", icon: "Φ", tip: "Fibonacci" }]
+            .map(({ id, icon, tip }) => (
+              <button key={icon} title={tip} className="btn-icon" onClick={() => setDrawMode(d => d === id ? null : id)}
+                style={{ width: 32, height: 32, justifyContent: "center", color: drawMode === id ? th.blue : text3, fontSize: 14, background: drawMode === id ? th.blue + "20" : "none" }}>
+                {icon}
+              </button>
+            ))}
+          <div style={{ flex: 1 }} />
+          <button className="btn-icon" style={{ width: 32, height: 32, justifyContent: "center", color: text3, fontSize: 14 }}>📸</button>
+        </div>
+
+        {/* Chart area */}
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+
+          {/* Indicator pills */}
+          <div style={{ height: 34, background: bg2, borderBottom: `1px solid ${border}`, display: "flex", alignItems: "center", paddingInline: 10, gap: 4, flexShrink: 0 }}>
+            <span style={{ fontSize: 9, color: text3, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".5px", marginRight: 4 }}>Indicateurs</span>
+            {[
+              { k: "sma20", label: "SMA 20", color: th.gold },
+              { k: "ema50", label: "EMA 50", color: th.purple },
+              { k: "volume", label: "Volume", color: th.blue },
+              { k: "rsi",   label: "RSI",    color: th.blue },
+              { k: "macd",  label: "MACD",   color: th.green },
+            ].map(({ k, label, color }) => (
+              <button key={k} onClick={() => setIndicators(p => ({ ...p, [k]: !p[k] }))}
+                style={{ padding: "2px 8px", borderRadius: 3, border: `1px solid ${indicators[k] ? color : border}`, background: indicators[k] ? color + "20" : "none", color: indicators[k] ? color : text3, cursor: "pointer", fontSize: 10, fontFamily: "inherit", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: indicators[k] ? color : text3 }} />
+                {label}
+              </button>
+            ))}
+            <div style={{ flex: 1 }} />
+            {indicators.sma20 && <span style={{ fontSize: 10, color: th.gold   }}>SMA20: {fmt(sma20.filter(Boolean).at(-1)   || 0)}</span>}
+            {indicators.ema50 && <span style={{ fontSize: 10, color: th.purple, marginLeft: 8 }}>EMA50: {fmt(ema50.filter(Boolean).at(-1) || 0)}</span>}
+            {indicators.rsi   && <span style={{ fontSize: 10, color: th.blue,   marginLeft: 8 }}>RSI: {(rsiData.filter(Boolean).at(-1) || 50).toFixed(1)}</span>}
+          </div>
+
+          {/* Canvas stack */}
+          <div style={{ flex: 1, position: "relative", overflow: "hidden" }}
+            onMouseMove={handleMouseMove}
+            onMouseLeave={handleMouseLeave}
+            onWheel={handleWheel}>
+            {/* Layer 1: main chart (expensive, redraws only when data/options change) */}
+            <canvas ref={canvasRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%" }} />
+            {/* Layer 2: crosshair (cheap, redraws every RAF tick) */}
+            <canvas ref={overlayRef} style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }} />
+          </div>
+
+          {/* Zoom slider */}
+          <div style={{ height: 28, background: bg2, borderTop: `1px solid ${border}`, display: "flex", alignItems: "center", paddingInline: 12, gap: 8 }}>
+            <span style={{ fontSize: 9, color: text3, fontWeight: 600 }}>ZOOM</span>
+            <input type="range" min={5} max={100}
+              value={Math.round((1 - (zoom.end - zoom.start)) * 100)}
+              onChange={e => {
+                const z = 1 - e.target.value / 100;
+                const c = (zoom.start + zoom.end) / 2;
+                setZoom({ start: Math.max(0, c - z / 2), end: Math.min(1, c + z / 2) });
+              }}
+              style={{ flex: 1, accentColor: th.blue, height: 4 }} />
+            <span style={{ fontSize: 9, color: text3 }}>{visibleData.length} bougies</span>
+            <button className="btn-icon" style={{ fontSize: 10, color: text3, padding: "2px 6px" }} onClick={() => setZoom({ start: 0,    end: 1 })}>Tout</button>
+            <button className="btn-icon" style={{ fontSize: 10, color: text3, padding: "2px 6px" }} onClick={() => setZoom({ start: 0.85, end: 1 })}>3M</button>
+          </div>
+        </div>
+
+        {/* Right panel */}
+        <div style={{ width: 280, background: bg2, borderLeft: `1px solid ${border}`, display: "flex", flexDirection: "column", flexShrink: 0 }}>
+          <div style={{ display: "flex", borderBottom: `1px solid ${border}`, flexShrink: 0 }}>
+            {[["watchlist","👁","Liste"], ["order","📋","Ordre"], ["alerts","🔔","Alertes"]].map(([panel, icon, label]) => (
+              <button key={panel} onClick={() => setActivePanel(panel)}
+                style={{ flex: 1, padding: "10px 4px", background: "none", border: "none", borderBottom: activePanel === panel ? `2px solid ${th.blue}` : "2px solid transparent", color: activePanel === panel ? th.blue : text3, cursor: "pointer", fontSize: 11, fontFamily: "inherit", fontWeight: 600 }}>
+                {icon} {label}
+              </button>
+            ))}
+          </div>
+
+          {/* Watchlist — uses React.memo WatchItem */}
+          {activePanel === "watchlist" && (
+            <div style={{ flex: 1, overflow: "auto" }}>
+              <div style={{ padding: "6px 10px 2px", fontSize: 9, color: text3, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".5px" }}>Favoris</div>
+              {watchData.filter(d => favorites.includes(d.sym)).map(d => (
+                <WatchItem key={d.sym} d={d} isActive={d.sym === activeSym} isUp={d.chg >= 0} onSelect={setActiveSym} th={th} />
+              ))}
+              <div style={{ padding: "10px 10px 2px", fontSize: 9, color: text3, fontWeight: 700, textTransform: "uppercase", letterSpacing: ".5px" }}>Tous les titres</div>
+              {watchData.filter(d => !favorites.includes(d.sym)).map(d => (
+                <WatchItem key={d.sym} d={d} isActive={d.sym === activeSym} isUp={d.chg >= 0} onSelect={setActiveSym} th={th} />
+              ))}
+            </div>
+          )}
+
+          {/* Order panel */}
+          {activePanel === "order" && (
+            <div style={{ flex: 1, padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ background: bg3, borderRadius: 8, padding: 12, border: `1px solid ${border}` }}>
+                <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 10 }}>{info.country} {activeSym} — {info.name}</div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, fontSize: 10 }}>
+                  {[["Dernier", fmt(last.c)+" F"], ["Variation", fmtPct(changePct)], ["Secteur", info.sector], ["Acheteur", fmt(last.c - Math.round(last.c * 0.001))+" F"]].map(([l, v]) => (
+                    <div key={l}>
+                      <div style={{ color: text3, fontSize: 9 }}>{l}</div>
+                      <div style={{ fontWeight: 700, color: l === "Variation" ? (changePct >= 0 ? th.upC : th.downC) : text }}>{v}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div style={{ display: "flex", borderRadius: 6, overflow: "hidden", border: `1px solid ${border}` }}>
+                {[["buy","ACHETER",th.upC], ["sell","VENDRE",th.downC]].map(([t, l, c]) => (
+                  <button key={t} onClick={() => setOrderTab(t)}
+                    style={{ flex: 1, padding: "8px 0", background: orderTab === t ? c + "20" : "none", border: "none", color: orderTab === t ? c : text3, cursor: "pointer", fontSize: 11, fontFamily: "inherit", fontWeight: 700, transition: "all .15s" }}>{l}</button>
+                ))}
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: text3, marginBottom: 4, fontWeight: 600, textTransform: "uppercase" }}>Prix (FCFA)</div>
+                <div style={{ display: "flex", gap: 4 }}>
+                  <input value={price_} onChange={e => setPrice_(e.target.value)} placeholder={fmt(last.c)}
+                    style={{ flex: 1, background: bg3, border: `1px solid ${border}`, borderRadius: 5, padding: "7px 10px", color: text, fontSize: 11, outline: "none" }} />
+                  <button onClick={() => setPrice_(String(last.c))} style={{ padding: "0 8px", background: bg3, border: `1px solid ${border}`, borderRadius: 5, color: text3, cursor: "pointer", fontSize: 9, fontFamily: "inherit" }}>Mkt</button>
+                </div>
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: text3, marginBottom: 4, fontWeight: 600, textTransform: "uppercase" }}>Quantité</div>
+                <input value={qty} onChange={e => setQty(e.target.value)} placeholder="ex: 10"
+                  style={{ width: "100%", background: bg3, border: `1px solid ${border}`, borderRadius: 5, padding: "7px 10px", color: text, fontSize: 11, outline: "none" }} />
+              </div>
+              {qty && price_ && (
+                <div style={{ background: bg3, borderRadius: 6, padding: 10, fontSize: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", color: text3 }}><span>Total</span><span style={{ color: text, fontWeight: 700 }}>{fmt(+qty * +price_)} FCFA</span></div>
+                  <div style={{ display: "flex", justifyContent: "space-between", color: text3, marginTop: 4 }}><span>Courtage ~0.6%</span><span>{fmt(+qty * +price_ * 0.006)} FCFA</span></div>
+                </div>
+              )}
+              <button style={{ padding: "10px 0", borderRadius: 6, border: "none", background: orderTab === "buy" ? th.upC : th.downC, color: "#000", fontFamily: "inherit", fontSize: 12, fontWeight: 800, cursor: "pointer" }}>
+                {orderTab === "buy" ? "PASSER ORDRE ACHAT" : "PASSER ORDRE VENTE"}
+              </button>
+              <div style={{ fontSize: 9, color: text3, textAlign: "center", lineHeight: 1.5 }}>Ordre informatif — passez par votre SGI agréée CREPMF</div>
+            </div>
+          )}
+
+          {/* Alerts */}
+          {activePanel === "alerts" && (
+            <div style={{ flex: 1, padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 700 }}>Alertes sur {activeSym}</div>
+              <div style={{ fontSize: 10, color: text3 }}>Cours : <span style={{ color: text, fontWeight: 700 }}>{fmt(last.c)} FCFA</span></div>
+              <button onClick={() => setShowAlertForm(f => !f)}
+                style={{ padding: "8px 12px", background: th.blue + "20", border: `1px solid ${th.blue}`, borderRadius: 6, color: th.blue, cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 700 }}>
+                + Nouvelle alerte
+              </button>
+              {showAlertForm && (
+                <div className="fade-in" style={{ background: bg3, borderRadius: 8, padding: 12, border: `1px solid ${border}`, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ fontSize: 10, color: text3 }}>Alerter quand le prix atteint :</div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input value={alertPrice} onChange={e => setAlertPrice(e.target.value)} placeholder={fmt(last.c)}
+                      style={{ flex: 1, background: bg2, border: `1px solid ${border}`, borderRadius: 4, padding: "6px 8px", color: text, fontSize: 11, outline: "none" }} />
+                    <span style={{ fontSize: 11, color: text3, display: "flex", alignItems: "center" }}>FCFA</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {[last.c * 0.95, last.c * 1.05, last.c * 1.10].map(p => (
+                      <button key={p} onClick={() => setAlertPrice(String(Math.round(p)))}
+                        style={{ flex: 1, padding: "4px 0", background: bg2, border: `1px solid ${border}`, borderRadius: 4, color: text3, cursor: "pointer", fontSize: 9, fontFamily: "inherit" }}>
+                        {p < last.c ? "▼" : "▲"} {fmtPct((p - last.c) / last.c * 100)}
+                      </button>
+                    ))}
+                  </div>
+                  <button onClick={() => { if (alertPrice) { setAlerts(a => [...a, { sym: activeSym, price: +alertPrice, set: last.c }]); setAlertPrice(""); setShowAlertForm(false); }}}
+                    style={{ padding: "7px 0", background: th.blue, border: "none", borderRadius: 5, color: "#fff", cursor: "pointer", fontFamily: "inherit", fontSize: 11, fontWeight: 700 }}>
+                    Créer
+                  </button>
+                </div>
+              )}
+              <div style={{ flex: 1, overflowY: "auto" }}>
+                {alerts.length === 0 && <div style={{ color: text3, fontSize: 10, textAlign: "center", marginTop: 20 }}>Aucune alerte</div>}
+                {alerts.map((a, i) => {
+                  const cur = CANDLE_DATA[a.sym]?.at(-1)?.c || 0;
+                  const triggered = (a.price > a.set && cur >= a.price) || (a.price < a.set && cur <= a.price);
+                  return (
+                    <div key={i} style={{ background: triggered ? th.gold + "15" : bg3, border: `1px solid ${triggered ? th.gold : border}`, borderRadius: 6, padding: 10, marginBottom: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <div style={{ fontSize: 11, fontWeight: 700 }}>{a.sym} → {fmt(a.price)} F</div>
+                        <div style={{ fontSize: 9, color: text3 }}>{triggered ? "⚡ DÉCLENCHÉ" : "En attente"}</div>
+                      </div>
+                      <button onClick={() => setAlerts(al => al.filter((_, j) => j !== i))}
+                        style={{ background: "none", border: "none", color: text3, cursor: "pointer", fontSize: 14 }}>×</button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* STATUS BAR */}
+      <div style={{ height: 24, background: bg2, borderTop: `1px solid ${border}`, display: "flex", alignItems: "center", paddingInline: 12, gap: 16, flexShrink: 0 }}>
+        {[["BRVM-C: 218.45", changePct >= 0 ? th.upC : th.downC], [`BRVM-10: 354.82 ${fmtPct(0.42)}`, th.upC], ["Vol: 2.4M titres", text3], ["Cap: 8 512 Mds FCFA", text3]]
+          .map(([label, color], i) => <span key={i} style={{ fontSize: 9, color, fontWeight: 600 }}>{label}</span>)}
+        <div style={{ flex: 1 }} />
+        <span style={{ fontSize: 9, color: text3 }}>© BONJOUR Finance — Données simulées</span>
+        <div className="live-dot" style={{ width: 5, height: 5, borderRadius: "50%", background: th.upC }} />
+      </div>
+    </div>
+  );
+}

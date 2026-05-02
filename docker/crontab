@@ -1,0 +1,11 @@
+# MANSA — Pipeline cron (P0-7 part 2).
+# Runs the BRVM data pipeline every 15 minutes during market hours
+# (10:00–15:30 GMT, Mon–Fri).
+
+# Format: m h dom mon dow command
+*/15 10-15 * * 1-5 cd /app && /opt/venv/bin/python server/data_pipeline.py >> /app/server/logs/cron.log 2>&1
+
+# End-of-day reconciliation: 16:30 GMT, weekdays.
+30 16 * * 1-5 cd /app && /opt/venv/bin/python server/data_pipeline.py --backfill 1 >> /app/server/logs/cron.log 2>&1
+
+# Empty trailing line required by cron.

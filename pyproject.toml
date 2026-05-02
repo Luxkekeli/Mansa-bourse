@@ -1,0 +1,69 @@
+[project]
+name = "mansa"
+version = "2.2.0"
+description = "MANSA — Plateforme d'investissement BRVM/UEMOA"
+requires-python = ">=3.10"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+extend-exclude = ["archive/", "data/", ".venv/", "venv/", "frontend/"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "S",    # bandit (security)
+    "UP",   # pyupgrade
+    "C4",   # comprehensions
+    "SIM",  # simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "S101",   # use of assert (OK in tests)
+    "S104",   # binding to all interfaces (we control via env)
+    "B008",   # default function call in arg
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S", "B"]
+"scripts/**" = ["S"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-ra",
+    "--strict-markers",
+    "--strict-config",
+    "--tb=short",
+]
+markers = [
+    "unit: unit tests (fast, no I/O)",
+    "integration: integration tests (DB, API)",
+    "e2e: end-to-end tests (browser)",
+    "slow: tests > 1s",
+]
+
+[tool.coverage.run]
+source = ["server"]
+omit = ["*/tests/*", "*/__init__.py", "*/archive/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]
+fail_under = 60
+show_missing = true
+
+[tool.bandit]
+exclude_dirs = ["tests", "archive", ".venv", "venv", "data"]
+skips = ["B101"]  # assert is OK in tests

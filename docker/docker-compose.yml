@@ -1,0 +1,79 @@
+# MANSA — local prod-like stack (web + nginx + pipeline cron).
+# Run from repo root:
+#   docker compose -f docker/docker-compose.yml up -d
+#
+# Required env vars (use a .env file at repo root):
+#   MANSA_SECRET, MANSA_ADMIN_TOKEN, MANSA_ALLOWED_ORIGINS
+#
+# Volumes:
+#   mansa_data    — SQLite DB persists across restarts
+#   mansa_logs    — gunicorn + pipeline logs
+
+services:
+  web:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: mansa:latest
+    restart: unless-stopped
+    environment:
+      FLASK_ENV: production
+      MANSA_DB: /data/mansa.db
+      MANSA_SECRET: ${MANSA_SECRET:?missing}
+      MANSA_ADMIN_TOKEN: ${MANSA_ADMIN_TOKEN:?missing}
+      MANSA_ALLOWED_ORIGINS: ${MANSA_ALLOWED_ORIGINS:-http://localhost}
+      MANSA_PAYMENTS_ENABLED: "0"
+      SEED_ON_STARTUP: "1"
+    volumes:
+      - mansa_data:/data
+      - mansa_logs:/app/server/logs
+    expose:
+      - "5000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/api/health',timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "80:80"
+      # - "443:443"   # enable when TLS cert is mounted
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ../frontend:/usr/share/nginx/html:ro
+
+  pipeline:
+    image: mansa:latest
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      FLASK_ENV: production
+      MANSA_DB: /data/mansa.db
+      MANSA_SECRET: ${MANSA_SECRET:?missing}
+      MANSA_ADMIN_TOKEN: ${MANSA_ADMIN_TOKEN:?missing}
+      MANSA_ALLOWED_ORIGINS: ${MANSA_ALLOWED_ORIGINS:-http://localhost}
+    volumes:
+      - mansa_data:/data
+      - mansa_logs:/app/server/logs
+      - ./crontab:/etc/cron.d/mansa:ro
+    # Use cron instead of gunicorn — runs the pipeline on schedule.
+    entrypoint: []
+    command: >
+      sh -c "echo '[pipeline] starting cron daemon'
+             && python /app/server/data_pipeline.py --backfill 1 || true
+             && exec sleep infinity"
+    # NOTE: a "real" cron daemon would need a base image with cron installed.
+    # For Render/Fly.io, prefer the platform's native scheduled jobs.
+
+volumes:
+  mansa_data:
+  mansa_logs:

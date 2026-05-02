@@ -1,0 +1,64 @@
+# MANSA — Render.com deployment manifest.
+# Push this file to the repo root (Render auto-detects it) and link your
+# repo from https://dashboard.render.com → New → Blueprint.
+#
+# Set the secrets in the Render dashboard before first deploy:
+#   MANSA_SECRET, MANSA_ADMIN_TOKEN, MANSA_ALLOWED_ORIGINS
+# Optionally:
+#   MANSA_PAYMENTS_ENABLED=0 (default disabled, P0-3)
+
+services:
+  - type: web
+    name: mansa-web
+    runtime: docker
+    repo: https://github.com/REPLACE-ME/mansa  # ← update with your repo
+    dockerfilePath: ./docker/Dockerfile
+    dockerContext: .
+    plan: starter           # 0.5 CPU / 512 MB. Bump to standard for prod traffic.
+    region: frankfurt        # closest to UEMOA latency-wise.
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: MANSA_DB
+        value: /data/mansa.db
+      - key: MANSA_PAYMENTS_ENABLED
+        value: "0"
+      - key: SEED_ON_STARTUP
+        value: "1"
+      - key: MANSA_SECRET
+        sync: false           # set in dashboard
+      - key: MANSA_ADMIN_TOKEN
+        sync: false
+      - key: MANSA_ALLOWED_ORIGINS
+        sync: false
+    disk:
+      name: mansa-data
+      mountPath: /data
+      sizeGB: 1
+
+  # Pipeline runs on a cron schedule managed by Render (no in-container cron).
+  - type: cron
+    name: mansa-pipeline
+    runtime: docker
+    repo: https://github.com/REPLACE-ME/mansa
+    dockerfilePath: ./docker/Dockerfile
+    dockerContext: .
+    schedule: "*/15 10-15 * * 1-5"   # every 15 min, 10:00–15:59 GMT, Mon–Fri
+    dockerCommand: python /app/server/data_pipeline.py
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: MANSA_DB
+        value: /data/mansa.db
+      - key: MANSA_SECRET
+        sync: false
+      - key: MANSA_ADMIN_TOKEN
+        sync: false
+      - key: MANSA_ALLOWED_ORIGINS
+        sync: false
+    disk:
+      name: mansa-data        # share the SAME disk as web
+      mountPath: /data
+      sizeGB: 1

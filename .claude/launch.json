@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mansa-dev",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["-m", "flask", "--app", "server.api_server", "run", "--port", "5000"],
+      "port": 5000,
+      "env": {
+        "FLASK_ENV": "development",
+        "MANSA_ALLOWED_ORIGINS": "http://localhost:5000,http://127.0.0.1:5000",
+        "MANSA_CAPTCHA_BYPASS": "1",
+        "PYTHONUNBUFFERED": "1"
+      }
+    }
+  ]
+}
